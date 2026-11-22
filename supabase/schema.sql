@@ -417,41 +417,36 @@ CREATE INDEX IF NOT EXISTS idx_sending_queue_sched ON public.sending_queue(statu
 CREATE INDEX IF NOT EXISTS idx_suppression_lookup ON public.suppression_list(workspace_id, email);
 
 -- ==============================================================================
--- STEP 3: ROW LEVEL SECURITY POLICIES
+-- STEP 3: ROW LEVEL SECURITY POLICIES (Non-Recursive)
 -- ==============================================================================
 CREATE OR REPLACE FUNCTION public.is_super_admin(lookup_user_id UUID)
-RETURNS BOOLEAN AS $$
-BEGIN
-    RETURN EXISTS (
-        SELECT 1 FROM public.profiles
-        WHERE id = lookup_user_id AND is_super_admin = TRUE
-    );
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT COALESCE(
+    (SELECT is_super_admin FROM public.profiles WHERE id = lookup_user_id),
+    FALSE
+  );
+$$;
 
 CREATE OR REPLACE FUNCTION public.is_workspace_member(check_workspace_id UUID, check_user_id UUID)
-RETURNS BOOLEAN AS $$
-BEGIN
-    IF public.is_super_admin(check_user_id) THEN
-        RETURN TRUE;
-    END IF;
-    RETURN EXISTS (
-        SELECT 1 FROM public.workspace_members
-        WHERE workspace_id = check_workspace_id AND user_id = check_user_id
-    );
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
-CREATE OR REPLACE FUNCTION public.get_user_workspaces(check_user_id UUID)
-RETURNS SETOF UUID AS $$
-BEGIN
-    IF public.is_super_admin(check_user_id) THEN
-        RETURN QUERY SELECT id FROM public.workspaces;
-    ELSE
-        RETURN QUERY SELECT workspace_id FROM public.workspace_members WHERE user_id = check_user_id;
-    END IF;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT (
+    public.is_super_admin(check_user_id)
+    OR EXISTS (
+      SELECT 1 FROM public.workspace_members
+      WHERE workspace_id = check_workspace_id AND user_id = check_user_id
+    )
+  );
+$$;
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.customers ENABLE ROW LEVEL SECURITY;
@@ -475,61 +470,85 @@ ALTER TABLE public.campaign_analytics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
--- Workspace-scoped Access Policies
+-- Non-recursive Profiles Policies
 DROP POLICY IF EXISTS "Profiles access" ON public.profiles;
-CREATE POLICY "Profiles access" ON public.profiles FOR ALL USING (
-    auth.uid() = id OR public.is_super_admin(auth.uid()) OR
-    id IN (SELECT user_id FROM public.workspace_members WHERE workspace_id IN (SELECT public.get_user_workspaces(auth.uid())))
-);
+DROP POLICY IF EXISTS "profiles_select_own" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_select_admin" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_insert_own" ON public.profiles;
 
-DROP POLICY IF EXISTS "Workspaces access" ON public.workspaces;
-CREATE POLICY "Workspaces access" ON public.workspaces FOR ALL USING (
-    public.is_workspace_member(id, auth.uid()) OR auth.uid() IS NOT NULL
-);
+CREATE POLICY "profiles_select_own" ON public.profiles FOR SELECT USING (auth.uid() = id);
+CREATE POLICY "profiles_select_admin" ON public.profiles FOR SELECT USING (public.is_super_admin(auth.uid()));
+CREATE POLICY "profiles_update_own" ON public.profiles FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY "profiles_insert_own" ON public.profiles FOR INSERT WITH CHECK (auth.uid() = id);
 
+-- Non-recursive Workspace Members Policies
 DROP POLICY IF EXISTS "Members access" ON public.workspace_members;
-CREATE POLICY "Members access" ON public.workspace_members FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+DROP POLICY IF EXISTS "workspace_members_select_own" ON public.workspace_members;
+DROP POLICY IF EXISTS "workspace_members_select_admin" ON public.workspace_members;
+DROP POLICY IF EXISTS "workspace_members_manage" ON public.workspace_members;
+
+CREATE POLICY "workspace_members_select_own" ON public.workspace_members FOR SELECT USING (user_id = auth.uid());
+CREATE POLICY "workspace_members_select_admin" ON public.workspace_members FOR SELECT USING (public.is_super_admin(auth.uid()));
+CREATE POLICY "workspace_members_manage" ON public.workspace_members FOR ALL USING (public.is_super_admin(auth.uid()) OR user_id = auth.uid());
+
+-- Workspaces Policies
+DROP POLICY IF EXISTS "Workspaces access" ON public.workspaces;
+DROP POLICY IF EXISTS "workspaces_all" ON public.workspaces;
+
+CREATE POLICY "workspaces_all" ON public.workspaces FOR ALL USING (
+    public.is_super_admin(auth.uid())
+    OR id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
+    OR auth.uid() IS NOT NULL
 );
 
+-- Tenant Tables Policies
 DROP POLICY IF EXISTS "Email accounts access" ON public.email_accounts;
 CREATE POLICY "Email accounts access" ON public.email_accounts FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+    public.is_super_admin(auth.uid())
+    OR workspace_id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
 );
 
 DROP POLICY IF EXISTS "Leads access" ON public.leads;
 CREATE POLICY "Leads access" ON public.leads FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+    public.is_super_admin(auth.uid())
+    OR workspace_id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
 );
 
 DROP POLICY IF EXISTS "Campaigns access" ON public.campaigns;
 CREATE POLICY "Campaigns access" ON public.campaigns FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+    public.is_super_admin(auth.uid())
+    OR workspace_id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
 );
 
 DROP POLICY IF EXISTS "Sequences access" ON public.campaign_sequences;
 CREATE POLICY "Sequences access" ON public.campaign_sequences FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+    public.is_super_admin(auth.uid())
+    OR workspace_id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
 );
 
 DROP POLICY IF EXISTS "Campaign leads access" ON public.campaign_leads;
 CREATE POLICY "Campaign leads access" ON public.campaign_leads FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+    public.is_super_admin(auth.uid())
+    OR workspace_id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
 );
 
 DROP POLICY IF EXISTS "Conversations access" ON public.conversations;
 CREATE POLICY "Conversations access" ON public.conversations FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+    public.is_super_admin(auth.uid())
+    OR workspace_id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
 );
 
 DROP POLICY IF EXISTS "Email messages access" ON public.email_messages;
 CREATE POLICY "Email messages access" ON public.email_messages FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+    public.is_super_admin(auth.uid())
+    OR workspace_id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
 );
 
 DROP POLICY IF EXISTS "Analytics access" ON public.campaign_analytics;
 CREATE POLICY "Analytics access" ON public.campaign_analytics FOR ALL USING (
-    public.is_workspace_member(workspace_id, auth.uid())
+    public.is_super_admin(auth.uid())
+    OR workspace_id IN (SELECT m.workspace_id FROM public.workspace_members m WHERE m.user_id = auth.uid())
 );
 
 -- ==============================================================================
