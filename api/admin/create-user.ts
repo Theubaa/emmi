@@ -6,11 +6,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL
+  const supabaseUrl =
+    process.env.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    'https://gftrwaufvhemzbieklfl.supabase.co'
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-  if (!supabaseUrl || !supabaseServiceKey) {
-    return res.status(500).json({ error: 'Supabase credentials not configured in Vercel environment' })
+  if (!supabaseServiceKey) {
+    return res.status(500).json({ error: 'SUPABASE_SERVICE_ROLE_KEY environment variable is not configured' })
   }
 
   const adminClient = createClient(supabaseUrl, supabaseServiceKey, {
@@ -24,7 +27,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'Email and password are required' })
     }
 
-    // 1. Create auth user with email confirmed
     const { data: authData, error: authError } = await adminClient.auth.admin.createUser({
       email,
       password,
@@ -36,7 +38,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: authError.message })
     }
 
-    // 2. Upsert profile
     if (authData?.user) {
       await adminClient.from('profiles').upsert({
         id: authData.user.id,
@@ -46,7 +47,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         updated_at: new Date().toISOString(),
       })
 
-      // 3. Log audit event
       await adminClient.from('audit_logs').insert({
         action: 'admin_create_user',
         resource_type: 'user',

@@ -6,11 +6,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL
+  const supabaseUrl =
+    process.env.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    'https://gftrwaufvhemzbieklfl.supabase.co'
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-  if (!supabaseUrl || !supabaseServiceKey) {
-    return res.status(500).json({ error: 'Supabase credentials not configured in Vercel environment' })
+  if (!supabaseServiceKey) {
+    return res.status(500).json({ error: 'SUPABASE_SERVICE_ROLE_KEY environment variable is not configured' })
   }
 
   const adminClient = createClient(supabaseUrl, supabaseServiceKey, {
