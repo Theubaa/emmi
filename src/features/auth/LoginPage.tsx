@@ -4,6 +4,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2, Eye, EyeOff, ShieldCheck, Lock } from 'lucide-react'
+import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/contexts/AuthContext'
 import { toast } from '@/hooks/use-toast'
 import { Button } from '@/components/ui/button'
@@ -32,7 +33,25 @@ export function LoginPage() {
     if (error) {
       toast({ title: 'Sign in failed', description: error.message, variant: 'destructive' })
     } else {
-      navigate('/')
+      // If super admin, route directly to super-user console
+      try {
+        const { data: sessionData } = await supabase.auth.getSession()
+        if (sessionData.session?.user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('is_super_admin')
+            .eq('id', sessionData.session.user.id)
+            .single()
+
+          if (profile?.is_super_admin) {
+            navigate('/super-user', { replace: true })
+            return
+          }
+        }
+      } catch {
+        // Fallback to default
+      }
+      navigate('/', { replace: true })
     }
   }
 

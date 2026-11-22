@@ -10,6 +10,7 @@ import { AdminLayout } from '@/components/layouts/AdminLayout'
 // Auth Pages
 import { LoginPage } from '@/features/auth/LoginPage'
 import { ForgotPasswordPage } from '@/features/auth/ForgotPasswordPage'
+import { SuperAdminLoginPage } from '@/features/auth/SuperAdminLoginPage'
 
 // App Pages
 import { DashboardPage } from '@/features/dashboard/DashboardPage'
@@ -51,6 +52,9 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (!user) return <Navigate to="/login" replace />
+  // Strict separation: Super Admin is redirected exclusively to the Super Admin console
+  if (user.is_super_admin) return <Navigate to="/super-user" replace />
+
   return <>{children}</>
 }
 
@@ -58,8 +62,18 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore()
   const { loading } = useAuth()
 
-  if (loading) return <div className="flex h-screen items-center justify-center"><Skeleton className="h-8 w-64" /></div>
-  if (!user) return <Navigate to="/login" replace />
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-zinc-950">
+        <div className="space-y-3 w-64">
+          <div className="h-8 w-8 rounded-full border-2 border-orange-500 border-t-transparent animate-spin mx-auto" />
+          <p className="text-xs text-zinc-400 text-center font-mono">Authenticating Root Console Access...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) return <Navigate to="/super-user/login" replace />
   if (!user.is_super_admin) return <Navigate to="/" replace />
   return <>{children}</>
 }
@@ -69,14 +83,33 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   const { loading } = useAuth()
 
   if (loading) return <div className="flex h-screen items-center justify-center"><Skeleton className="h-8 w-64" /></div>
-  if (user) return <Navigate to="/" replace />
+  if (user) {
+    if (user.is_super_admin) return <Navigate to="/super-user" replace />
+    return <Navigate to="/" replace />
+  }
+  return <>{children}</>
+}
+
+function SuperAdminPublicRoute({ children }: { children: React.ReactNode }) {
+  const { user } = useAuthStore()
+  const { loading } = useAuth()
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-zinc-950">
+        <div className="h-8 w-8 rounded-full border-2 border-orange-500 border-t-transparent animate-spin mx-auto" />
+      </div>
+    )
+  }
+
+  if (user?.is_super_admin) return <Navigate to="/super-user" replace />
   return <>{children}</>
 }
 
 export default function App() {
   return (
     <Routes>
-      {/* Auth Routes */}
+      {/* Standard User Auth Routes */}
       <Route element={<AuthLayout />}>
         <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
         {/* Public sign up disabled: redirected to /login */}
@@ -84,10 +117,24 @@ export default function App() {
         <Route path="/forgot-password" element={<PublicRoute><ForgotPasswordPage /></PublicRoute>} />
       </Route>
 
+      {/* Super Admin Dedicated Login Route */}
+      <Route
+        path="/super-user/login"
+        element={
+          <SuperAdminPublicRoute>
+            <SuperAdminLoginPage />
+          </SuperAdminPublicRoute>
+        }
+      />
+
+      {/* Legacy /admin redirects */}
+      <Route path="/admin" element={<Navigate to="/super-user" replace />} />
+      <Route path="/admin/*" element={<Navigate to="/super-user" replace />} />
+
       {/* Workspace Setup */}
       <Route path="/workspace/setup" element={<ProtectedRoute><WorkspaceSetupPage /></ProtectedRoute>} />
 
-      {/* App Routes */}
+      {/* Standard App Routes (Tenant Workspaces Only) */}
       <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/email-accounts" element={<EmailAccountsPage />} />
@@ -102,13 +149,13 @@ export default function App() {
         <Route path="/billing" element={<BillingPage />} />
       </Route>
 
-      {/* Super Admin Routes */}
+      {/* Super Admin Protected Console (/super-user) */}
       <Route element={<AdminRoute><AdminLayout /></AdminRoute>}>
-        <Route path="/admin" element={<AdminDashboardPage />} />
-        <Route path="/admin/users" element={<AdminUsersPage />} />
-        <Route path="/admin/customers" element={<AdminCustomersPage />} />
-        <Route path="/admin/workspaces" element={<AdminWorkspacesPage />} />
-        <Route path="/admin/audit-logs" element={<AdminAuditLogsPage />} />
+        <Route path="/super-user" element={<AdminDashboardPage />} />
+        <Route path="/super-user/users" element={<AdminUsersPage />} />
+        <Route path="/super-user/customers" element={<AdminCustomersPage />} />
+        <Route path="/super-user/workspaces" element={<AdminWorkspacesPage />} />
+        <Route path="/super-user/audit-logs" element={<AdminAuditLogsPage />} />
       </Route>
 
       {/* Catch-all */}

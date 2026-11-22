@@ -3,7 +3,7 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Mail, Megaphone, Users, Inbox, BarChart3,
   UserCog, Settings, CreditCard, ChevronLeft, ChevronRight,
-  LogOut, Building2, Bell, Moon, Sun, Shield,
+  LogOut, Building2, Bell, Moon, Sun,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth.store'
@@ -99,26 +99,6 @@ export function AppLayout() {
               {!collapsed && <span>{item.label}</span>}
             </NavLink>
           ))}
-
-          {/* Super Admin Link */}
-          {user?.is_super_admin && (
-            <NavLink
-              to="/admin"
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors mt-4 border border-sidebar-border',
-                  isActive
-                    ? 'bg-orange-500/20 text-orange-400 border-orange-500/30'
-                    : 'text-orange-400/70 hover:bg-orange-500/10 hover:text-orange-400',
-                  collapsed && 'justify-center px-2'
-                )
-              }
-              title={collapsed ? 'Super Admin' : undefined}
-            >
-              <Shield className="h-5 w-5 shrink-0" />
-              {!collapsed && <span>Super Admin</span>}
-            </NavLink>
-          )}
         </nav>
 
         {/* Bottom section */}
