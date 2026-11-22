@@ -79,9 +79,33 @@ export function AdminUsersPage() {
     },
   })
 
-  // Create user via backend API
+  // Create user via Supabase RPC or fallback to backend API
   const createUserMutation = useMutation({
     mutationFn: async (data: CreateUserForm) => {
+      // 1. Try Supabase direct RPC first (bypasses Vercel serverless env key issues)
+      try {
+        const { data: rpcData, error: rpcError } = await (supabase.rpc as any)('create_new_user', {
+          user_email: data.email,
+          user_password: data.password,
+          user_name: data.fullName,
+          make_super_admin: !!data.isSuperAdmin,
+        })
+
+        if (!rpcError && rpcData) {
+          return rpcData
+        }
+
+        // If the error is NOT that the function doesn't exist, throw the real error (e.g. email exists)
+        if (rpcError && !rpcError.message.includes('function') && !rpcError.message.includes('does not exist')) {
+          throw new Error(rpcError.message)
+        }
+      } catch (err: any) {
+        if (!err.message?.includes('function') && !err.message?.includes('does not exist')) {
+          throw err
+        }
+      }
+
+      // 2. Fallback to /api/admin/create-user
       const response = await fetch('/api/admin/create-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -90,7 +114,7 @@ export function AdminUsersPage() {
 
       const result = await response.json()
       if (!response.ok) {
-        throw new Error(result.error || 'Failed to create user')
+        throw new Error(result.error || result.hint || 'Failed to create user')
       }
       return result
     },
@@ -135,9 +159,29 @@ export function AdminUsersPage() {
     },
   })
 
-  // Delete user
+  // Delete user via Supabase RPC or fallback to backend API
   const deleteUserMutation = useMutation({
     mutationFn: async (userId: string) => {
+      // 1. Try direct Supabase RPC
+      try {
+        const { data: rpcData, error: rpcError } = await (supabase.rpc as any)('delete_user_by_admin', {
+          target_user_id: userId,
+        })
+
+        if (!rpcError && rpcData) {
+          return rpcData
+        }
+
+        if (rpcError && !rpcError.message.includes('function') && !rpcError.message.includes('does not exist')) {
+          throw new Error(rpcError.message)
+        }
+      } catch (err: any) {
+        if (!err.message?.includes('function') && !err.message?.includes('does not exist')) {
+          throw err
+        }
+      }
+
+      // 2. Fallback to API
       const response = await fetch('/api/admin/delete-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -145,7 +189,7 @@ export function AdminUsersPage() {
       })
       const result = await response.json()
       if (!response.ok) {
-        throw new Error(result.error || 'Failed to delete user')
+        throw new Error(result.error || result.hint || 'Failed to delete user')
       }
       return result
     },
