@@ -274,9 +274,12 @@ BEGIN
     ''
   );
 
-  -- Insert identity
+  -- Insert identity with provider_id
+  DELETE FROM auth.identities WHERE provider = 'email' AND (provider_id = new_user_id::text OR identity_data->>'email' = user_email);
+
   INSERT INTO auth.identities (
     id,
+    provider_id,
     user_id,
     identity_data,
     provider,
@@ -284,7 +287,8 @@ BEGIN
     created_at,
     updated_at
   ) VALUES (
-    gen_random_uuid(),
+    gen_random_uuid()::text,
+    new_user_id::text,
     new_user_id,
     jsonb_build_object('sub', new_user_id::text, 'email', user_email),
     'email',
@@ -354,8 +358,10 @@ BEGIN
     RAISE EXCEPTION 'Access Denied: Only Super Administrators can delete users.';
   END IF;
 
-  DELETE FROM auth.users WHERE id = target_user_id;
+  DELETE FROM auth.identities WHERE user_id = target_user_id;
+  DELETE FROM public.workspace_members WHERE user_id = target_user_id;
   DELETE FROM public.profiles WHERE id = target_user_id;
+  DELETE FROM auth.users WHERE id = target_user_id;
 
   INSERT INTO public.audit_logs (
     user_id,
@@ -402,10 +408,17 @@ BEGIN
     RAISE EXCEPTION 'Access Denied: Only Super Administrators can onboard customers.';
   END IF;
 
-  -- 1. Create Customer record
-  new_cust_id := gen_random_uuid();
-  INSERT INTO public.customers (id, name, email, plan, status, created_at, updated_at)
-  VALUES (new_cust_id, company_name, owner_email, plan_tier, 'active', now(), now());
+  -- 1. Create or Update Customer record (handles re-creation smoothly)
+  SELECT id INTO new_cust_id FROM public.customers WHERE email = owner_email;
+  IF new_cust_id IS NULL THEN
+    new_cust_id := gen_random_uuid();
+    INSERT INTO public.customers (id, name, email, plan, status, created_at, updated_at)
+    VALUES (new_cust_id, company_name, owner_email, plan_tier, 'active', now(), now());
+  ELSE
+    UPDATE public.customers
+    SET name = company_name, plan = plan_tier, status = 'active', updated_at = now()
+    WHERE id = new_cust_id;
+  END IF;
 
   -- 2. Create Workspace
   new_ws_id := gen_random_uuid();
@@ -432,12 +445,17 @@ BEGIN
       now(), now(), '', ''
     );
 
+    DELETE FROM auth.identities WHERE provider = 'email' AND (provider_id = new_user_id::text OR identity_data->>'email' = owner_email);
+
     INSERT INTO auth.identities (
-      id, user_id, identity_data, provider, last_sign_in_at, created_at, updated_at
+      id, provider_id, user_id, identity_data, provider, last_sign_in_at, created_at, updated_at
     ) VALUES (
-      gen_random_uuid(), new_user_id,
+      gen_random_uuid()::text,
+      new_user_id::text,
+      new_user_id,
       jsonb_build_object('sub', new_user_id::text, 'email', owner_email),
-      'email', now(), now(), now()
+      'email',
+      now(), now(), now()
     );
 
     INSERT INTO public.profiles (
@@ -445,6 +463,16 @@ BEGIN
     ) VALUES (
       new_user_id, owner_email, owner_full_name, FALSE, now(), now()
     );
+  ELSE
+    -- If user exists in auth.users, update password & profile
+    encrypted_pw := crypt(owner_password, gen_salt('bf'));
+    UPDATE auth.users
+    SET encrypted_password = encrypted_pw, updated_at = now()
+    WHERE id = new_user_id;
+
+    INSERT INTO public.profiles (id, email, full_name, is_super_admin, updated_at)
+    VALUES (new_user_id, owner_email, owner_full_name, FALSE, now())
+    ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name, updated_at = now();
   END IF;
 
   -- 4. Add User as Owner of the Workspace
