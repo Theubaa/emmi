@@ -52,6 +52,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: error.message })
     }
 
+    await adminClient.from('workspace_members').delete().eq('user_id', userId)
     await adminClient.from('profiles').delete().eq('id', userId)
 
     return res.status(200).json({ success: true })

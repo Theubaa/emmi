@@ -5,21 +5,18 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import {
   Building2,
-  Plus,
+  UserPlus,
   Search,
   CheckCircle,
   Ban,
   Trash2,
   Edit2,
-  Key,
   Copy,
   Check,
-  Eye,
-  EyeOff,
-  Sparkles,
   Send,
   Loader2,
-  ShieldAlert,
+  ExternalLink,
+  MailCheck,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { toast } from '@/hooks/use-toast'
@@ -46,41 +43,29 @@ import {
 } from '@/components/ui/select'
 import type { Customer } from '@/types/database'
 
-function generateStrongPassword() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*'
-  let pw = ''
-  for (let i = 0; i < 12; i++) {
-    pw += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
-  return 'Emmi#' + pw
-}
-
-const createCustomerSchema = z.object({
+const inviteCustomerSchema = z.object({
   name: z.string().min(2, 'Company / Organization name is required'),
-  ownerName: z.string().min(2, 'Owner / Contact person name is required'),
-  email: z.string().email('Valid customer login email required'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  ownerName: z.string().min(2, 'Customer admin name is required'),
+  email: z.string().email('Valid customer email required'),
   plan: z.enum(['starter', 'growth', 'pro', 'enterprise']).default('starter'),
-  status: z.enum(['active', 'trial', 'suspended']).default('active'),
 })
 
-type CreateCustomerForm = z.infer<typeof createCustomerSchema>
+type InviteCustomerForm = z.infer<typeof inviteCustomerSchema>
 
-interface CreatedCredentials {
+interface InviteSuccessData {
   companyName: string
   ownerName: string
   email: string
-  password: string
   plan: string
+  inviteLink?: string | null
 }
 
 export function AdminCustomersPage() {
   const [search, setSearch] = useState('')
-  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showInviteModal, setShowInviteModal] = useState(false)
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null)
-  const [showPassword, setShowPassword] = useState(false)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
-  const [createdCredentials, setCreatedCredentials] = useState<CreatedCredentials | null>(null)
+  const [inviteSuccess, setInviteSuccess] = useState<InviteSuccessData | null>(null)
 
   const queryClient = useQueryClient()
 
@@ -91,17 +76,14 @@ export function AdminCustomersPage() {
     setValue,
     watch,
     formState: { errors, isSubmitting },
-  } = useForm<CreateCustomerForm>({
-    resolver: zodResolver(createCustomerSchema),
+  } = useForm<InviteCustomerForm>({
+    resolver: zodResolver(inviteCustomerSchema),
     defaultValues: {
       plan: 'starter',
-      status: 'active',
-      password: generateStrongPassword(),
     },
   })
 
   const selectedPlan = watch('plan')
-  const selectedStatus = watch('status')
 
   // Fetch all customers
   const { data: customers, isLoading } = useQuery({
@@ -117,113 +99,45 @@ export function AdminCustomersPage() {
     },
   })
 
-  // Onboard customer mutation (Customer Org + Workspace + Admin User Login)
-  const createCustomerMutation = useMutation({
-    mutationFn: async (data: CreateCustomerForm) => {
-      // 1. Try master RPC onboard_new_customer
-      try {
-        const { data: rpcData, error: rpcError } = await (supabase.rpc as any)('onboard_new_customer', {
-          company_name: data.name,
-          owner_email: data.email,
-          owner_password: data.password,
-          owner_full_name: data.ownerName,
-          plan_tier: data.plan,
-        })
+  // Invite Customer Mutation via Vercel /api/admin/invite-customer
+  const inviteCustomerMutation = useMutation({
+    mutationFn: async (data: InviteCustomerForm) => {
+      const response = await fetch('/api/admin/invite-customer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      })
 
-        if (!rpcError && rpcData) {
-          return {
-            companyName: data.name,
-            ownerName: data.ownerName,
-            email: data.email,
-            password: data.password,
-            plan: data.plan,
-          }
-        }
-
-        if (rpcError && !rpcError.message.includes('function') && !rpcError.message.includes('does not exist')) {
-          throw new Error(rpcError.message)
-        }
-      } catch (err: any) {
-        if (!err.message?.includes('function') && !err.message?.includes('does not exist')) {
-          throw err
-        }
-      }
-
-      // 2. Direct fallback: insert customer + workspace + user
-      const { data: customer, error: customerErr } = await supabase
-        .from('customers')
-        .insert({
-          name: data.name,
-          email: data.email,
-          plan: data.plan,
-          status: data.status,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .select()
-        .single()
-
-      if (customerErr) throw customerErr
-
-      // Create workspace
-      const wsSlug = data.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Math.random().toString(36).substring(2, 6)
-      const { data: ws } = await supabase
-        .from('workspaces')
-        .insert({
-          customer_id: customer.id,
-          name: `${data.name} Workspace`,
-          slug: wsSlug,
-          status: 'active',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .select()
-        .single()
-
-      // Create user login account via RPC or API
-      try {
-        await (supabase.rpc as any)('create_new_user', {
-          user_email: data.email,
-          user_password: data.password,
-          user_name: data.ownerName,
-          make_super_admin: false,
-        })
-      } catch {
-        // Fallback to API
-        await fetch('/api/admin/create-user', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: data.email,
-            password: data.password,
-            fullName: data.ownerName,
-            isSuperAdmin: false,
-          }),
-        })
+      const result = await response.json()
+      if (!response.ok) {
+        throw new Error(result.error || result.hint || 'Failed to send customer invitation.')
       }
 
       return {
         companyName: data.name,
         ownerName: data.ownerName,
         email: data.email,
-        password: data.password,
         plan: data.plan,
-      }
+        inviteLink: result.inviteLink || null,
+      } as InviteSuccessData
     },
-    onSuccess: (credentials) => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['admin-customers'] })
       queryClient.invalidateQueries({ queryKey: ['admin-workspaces'] })
-      queryClient.invalidateQueries({ queryKey: ['admin-profiles'] })
       queryClient.invalidateQueries({ queryKey: ['super-admin-overview'] })
 
-      setShowCreateModal(false)
-      setCreatedCredentials(credentials)
+      setShowInviteModal(false)
+      setInviteSuccess(data)
       reset()
+      toast({
+        title: 'Invitation Sent!',
+        description: `Customer invite email delivered to ${data.email}.`,
+      })
     },
     onError: (err: any) => {
       toast({
-        title: 'Customer Onboarding Failed',
-        description: err.message || 'Could not provision customer organization and login.',
+        title: 'Invitation Failed',
+        description: err.message,
         variant: 'destructive',
       })
     },
@@ -244,7 +158,7 @@ export function AdminCustomersPage() {
     onSuccess: (nextStatus) => {
       queryClient.invalidateQueries({ queryKey: ['admin-customers'] })
       queryClient.invalidateQueries({ queryKey: ['super-admin-overview'] })
-      toast({ title: 'Customer Status Updated', description: `Account status is now ${nextStatus}.` })
+      toast({ title: 'Customer Status Updated', description: `Account is now ${nextStatus}.` })
     },
     onError: (err: any) => {
       toast({ title: 'Status Update Failed', description: err.message, variant: 'destructive' })
@@ -280,7 +194,7 @@ export function AdminCustomersPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin-customers'] })
       queryClient.invalidateQueries({ queryKey: ['super-admin-overview'] })
-      toast({ title: 'Customer Deleted', description: 'Customer account and related workspaces removed.' })
+      toast({ title: 'Customer Deleted', description: 'Customer organization and linked workspaces removed.' })
     },
     onError: (err: any) => {
       toast({ title: 'Deletion Failed', description: err.message, variant: 'destructive' })
@@ -294,26 +208,24 @@ export function AdminCustomersPage() {
     toast({ title: 'Copied to Clipboard' })
   }
 
-  const welcomeEmailText = createdCredentials
-    ? `Subject: Welcome to EMMIL - Your Workspace Login Credentials
+  const emailTemplateText = inviteSuccess
+    ? `Subject: You're invited to EMMIL - Cold Outreach Platform
 
-Hi ${createdCredentials.ownerName},
+Hi ${inviteSuccess.ownerName},
 
-Your EMMIL cold outreach workspace has been provisioned!
+You have been invited to set up your cold outreach workspace on EMMIL.
 
-Login Portal: https://emmi.vascularexpert.in/login
-Email: ${createdCredentials.email}
-Password: ${createdCredentials.password}
+Please click the link below to set your password and activate your account:
+${inviteSuccess.inviteLink || 'https://emmi.vascularexpert.in/set-password'}
 
-Plan Tier: ${createdCredentials.plan.toUpperCase()}
+Company: ${inviteSuccess.companyName}
+Plan: ${inviteSuccess.plan.toUpperCase()}
+Email: ${inviteSuccess.email}
 
-Next Steps:
-1. Log in to your workspace at https://emmi.vascularexpert.in/login
-2. Connect your sending email accounts (Google, Outlook, or Custom SMTP/IMAP)
-3. Upload your leads and launch your first email outreach campaign.
+Once your password is set, you will be redirected to the sign-in page to access your campaigns.
 
 Best regards,
-EMMIL Administrator Team`
+EMMIL Team`
     : ''
 
   return (
@@ -326,7 +238,7 @@ EMMIL Administrator Team`
             Customer Organizations
           </h1>
           <p className="text-zinc-400 text-sm">
-            Onboard client organizations, generate initial login credentials, and manage service tiers.
+            Invite client companies, provision automated workspaces, and manage service tiers.
           </p>
         </div>
 
@@ -340,14 +252,11 @@ EMMIL Administrator Team`
             />
           </div>
           <Button
-            onClick={() => {
-              setValue('password', generateStrongPassword())
-              setShowCreateModal(true)
-            }}
+            onClick={() => setShowInviteModal(true)}
             className="bg-orange-600 hover:bg-orange-700 text-white shrink-0 shadow-lg shadow-orange-600/20"
           >
-            <Plus className="h-4 w-4 mr-2" />
-            Add Customer
+            <UserPlus className="h-4 w-4 mr-2" />
+            Invite Customer
           </Button>
         </div>
       </div>
@@ -359,9 +268,9 @@ EMMIL Administrator Team`
             <thead>
               <tr className="border-b border-zinc-800 bg-zinc-950/60 text-left text-xs font-semibold text-zinc-400 uppercase tracking-wider">
                 <th className="p-3.5">Organization</th>
-                <th className="p-3.5">Admin Email</th>
+                <th className="p-3.5">Customer Admin Email</th>
                 <th className="p-3.5">Plan Tier</th>
-                <th className="p-3.5">Account Status</th>
+                <th className="p-3.5">Status</th>
                 <th className="p-3.5">Registered</th>
                 <th className="p-3.5 text-right">Actions</th>
               </tr>
@@ -442,7 +351,7 @@ EMMIL Administrator Team`
                         size="sm"
                         className="text-zinc-500 hover:text-rose-400 hover:bg-rose-950/20"
                         onClick={() => {
-                          if (confirm(`Are you sure you want to delete customer "${c.name}"? This action cannot be undone.`)) {
+                          if (confirm(`Are you sure you want to delete customer "${c.name}"? This will remove their workspaces.`)) {
                             deleteCustomerMutation.mutate(c.id)
                           }
                         }}
@@ -459,7 +368,7 @@ EMMIL Administrator Team`
                     <Building2 className="h-10 w-10 mx-auto text-zinc-600 mb-2 opacity-50" />
                     <p className="text-base text-zinc-400">No customer accounts registered yet.</p>
                     <p className="text-xs text-zinc-500">
-                      Click the "Add Customer" button above to register your first client organization.
+                      Click the "Invite Customer" button above to send your first invitation.
                     </p>
                   </td>
                 </tr>
@@ -469,20 +378,20 @@ EMMIL Administrator Team`
         </div>
       </Card>
 
-      {/* Onboard Customer Modal */}
-      <Dialog open={showCreateModal} onOpenChange={setShowCreateModal}>
+      {/* Invite Customer Modal */}
+      <Dialog open={showInviteModal} onOpenChange={setShowInviteModal}>
         <DialogContent className="bg-zinc-900 border-zinc-800 text-white max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-xl">
-              <Building2 className="h-5 w-5 text-orange-500" />
-              Onboard New Customer & Login Account
+              <UserPlus className="h-5 w-5 text-orange-500" />
+              Invite Customer Organization
             </DialogTitle>
             <DialogDescription className="text-zinc-400 text-xs">
-              This provisions their company workspace, creates the customer login, and sets their password.
+              An invitation email will be delivered via Supabase Auth. The customer will click the link to set their password.
             </DialogDescription>
           </DialogHeader>
 
-          <form onSubmit={handleSubmit((d) => createCustomerMutation.mutate(d))} className="space-y-4">
+          <form onSubmit={handleSubmit((d) => inviteCustomerMutation.mutate(d))} className="space-y-4">
             <div className="space-y-1.5">
               <Label className="text-xs text-zinc-300">Company / Organization Name</Label>
               <Input
@@ -505,7 +414,7 @@ EMMIL Administrator Team`
               </div>
 
               <div className="space-y-1.5">
-                <Label className="text-xs text-zinc-300">Customer Login Email</Label>
+                <Label className="text-xs text-zinc-300">Customer Email (For Invite)</Label>
                 <Input
                   type="email"
                   placeholder="admin@acmehealth.com"
@@ -517,74 +426,26 @@ EMMIL Administrator Team`
             </div>
 
             <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-zinc-300">Password for Customer</Label>
-                <button
-                  type="button"
-                  onClick={() => setValue('password', generateStrongPassword())}
-                  className="text-[11px] text-orange-400 hover:text-orange-300 flex items-center gap-1 font-mono"
-                >
-                  <Sparkles className="h-3 w-3" /> Generate Random
-                </button>
-              </div>
-              <div className="relative">
-                <Input
-                  type={showPassword ? 'text' : 'password'}
-                  placeholder="Minimum 8 characters"
-                  className="bg-zinc-950 border-zinc-700 text-white font-mono placeholder:text-zinc-600 pr-10"
-                  {...register('password')}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
-                >
-                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-              {errors.password && <p className="text-xs text-rose-400">{errors.password.message}</p>}
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label className="text-xs text-zinc-300">Plan Tier</Label>
-                <Select
-                  value={selectedPlan}
-                  onValueChange={(val: any) => setValue('plan', val)}
-                >
-                  <SelectTrigger className="bg-zinc-950 border-zinc-700 text-white">
-                    <SelectValue placeholder="Select plan" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-zinc-900 border-zinc-800 text-white">
-                    <SelectItem value="starter">Starter (5 Mailboxes)</SelectItem>
-                    <SelectItem value="growth">Growth (20 Mailboxes)</SelectItem>
-                    <SelectItem value="pro">Pro (50 Mailboxes)</SelectItem>
-                    <SelectItem value="enterprise">Enterprise (Unlimited)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label className="text-xs text-zinc-300">Initial Status</Label>
-                <Select
-                  value={selectedStatus}
-                  onValueChange={(val: any) => setValue('status', val)}
-                >
-                  <SelectTrigger className="bg-zinc-950 border-zinc-700 text-white">
-                    <SelectValue placeholder="Select status" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-zinc-900 border-zinc-800 text-white">
-                    <SelectItem value="active">Active</SelectItem>
-                    <SelectItem value="trial">Trial</SelectItem>
-                    <SelectItem value="suspended">Suspended</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+              <Label className="text-xs text-zinc-300">Plan Tier</Label>
+              <Select
+                value={selectedPlan}
+                onValueChange={(val: any) => setValue('plan', val)}
+              >
+                <SelectTrigger className="bg-zinc-950 border-zinc-700 text-white">
+                  <SelectValue placeholder="Select plan" />
+                </SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-800 text-white">
+                  <SelectItem value="starter">Starter (5 Mailboxes)</SelectItem>
+                  <SelectItem value="growth">Growth (20 Mailboxes)</SelectItem>
+                  <SelectItem value="pro">Pro (50 Mailboxes)</SelectItem>
+                  <SelectItem value="enterprise">Enterprise (Unlimited)</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="rounded-lg bg-orange-950/20 border border-orange-500/20 p-3">
               <p className="text-[11px] text-orange-300 leading-relaxed">
-                A dedicated workspace will be auto-generated and linked to this user as Owner. On submission, you will receive their login link and credentials to share with them.
+                Supabase Auth will dispatch a secure invitation link to their inbox. Upon setting their password, they will be redirected to the sign-in screen to enter their workspace.
               </p>
             </div>
 
@@ -592,7 +453,7 @@ EMMIL Administrator Team`
               <Button
                 type="button"
                 variant="ghost"
-                onClick={() => setShowCreateModal(false)}
+                onClick={() => setShowInviteModal(false)}
                 className="text-zinc-400 hover:text-white"
               >
                 Cancel
@@ -600,80 +461,82 @@ EMMIL Administrator Team`
               <Button
                 type="submit"
                 className="bg-orange-600 hover:bg-orange-700 text-white shadow-md shadow-orange-600/20"
-                disabled={isSubmitting || createCustomerMutation.isPending}
+                disabled={isSubmitting || inviteCustomerMutation.isPending}
               >
-                {(isSubmitting || createCustomerMutation.isPending) && (
+                {(isSubmitting || inviteCustomerMutation.isPending) && (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 )}
-                Create Customer & Login
+                Send Customer Invitation
               </Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
 
-      {/* Customer Credentials Ready Success Modal */}
-      {createdCredentials && (
-        <Dialog open={!!createdCredentials} onOpenChange={() => setCreatedCredentials(null)}>
+      {/* Customer Invitation Success Modal */}
+      {inviteSuccess && (
+        <Dialog open={!!inviteSuccess} onOpenChange={() => setInviteSuccess(null)}>
           <DialogContent className="bg-zinc-900 border-zinc-800 text-white max-w-lg">
             <DialogHeader>
               <div className="flex items-center gap-2 text-emerald-400">
-                <CheckCircle className="h-6 w-6" />
-                <DialogTitle className="text-xl text-white">Customer Provisioned Successfully!</DialogTitle>
+                <MailCheck className="h-6 w-6" />
+                <DialogTitle className="text-xl text-white">Invitation Dispatched!</DialogTitle>
               </div>
               <DialogDescription className="text-zinc-400 text-xs">
-                The customer organization, workspace, and login credentials have been created.
+                The invitation email was sent to <span className="text-white font-medium">{inviteSuccess.email}</span>.
               </DialogDescription>
             </DialogHeader>
 
             <div className="space-y-4 py-2">
               <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-4 space-y-3 font-mono text-xs">
                 <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
-                  <span className="text-zinc-500">Portal URL</span>
-                  <span className="text-orange-400 font-bold select-all">https://emmi.vascularexpert.in/login</span>
+                  <span className="text-zinc-500">Organization</span>
+                  <span className="text-white font-semibold">{inviteSuccess.companyName}</span>
                 </div>
 
                 <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
-                  <span className="text-zinc-500">Customer</span>
-                  <span className="text-white font-semibold">{createdCredentials.companyName}</span>
-                </div>
-
-                <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
-                  <span className="text-zinc-500">Login Email</span>
-                  <span className="text-zinc-200 select-all font-semibold">{createdCredentials.email}</span>
+                  <span className="text-zinc-500">Admin Email</span>
+                  <span className="text-zinc-200 select-all font-semibold">{inviteSuccess.email}</span>
                 </div>
 
                 <div className="flex justify-between items-center">
-                  <span className="text-zinc-500">Password</span>
-                  <span className="text-emerald-400 font-bold select-all">{createdCredentials.password}</span>
+                  <span className="text-zinc-500">Plan</span>
+                  <span className="text-orange-400 uppercase font-bold">{inviteSuccess.plan}</span>
                 </div>
               </div>
 
+              {inviteSuccess.inviteLink && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-zinc-400">Direct Invitation Link (Backup / Instant Share):</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      readOnly
+                      value={inviteSuccess.inviteLink}
+                      className="bg-zinc-950 border-zinc-800 text-xs font-mono text-zinc-300 h-9"
+                    />
+                    <Button
+                      size="sm"
+                      className="bg-zinc-800 hover:bg-zinc-700 text-white shrink-0"
+                      onClick={() => copyToClipboard(inviteSuccess.inviteLink || '', 'link')}
+                    >
+                      {copiedKey === 'link' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               <div className="flex gap-2">
                 <Button
-                  className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white text-xs"
-                  onClick={() =>
-                    copyToClipboard(
-                      `Portal: https://emmi.vascularexpert.in/login\nEmail: ${createdCredentials.email}\nPassword: ${createdCredentials.password}`,
-                      'creds'
-                    )
-                  }
-                >
-                  {copiedKey === 'creds' ? <Check className="h-3.5 w-3.5 mr-1 text-emerald-400" /> : <Copy className="h-3.5 w-3.5 mr-1" />}
-                  Copy Login & Password
-                </Button>
-
-                <Button
                   className="flex-1 bg-orange-600 hover:bg-orange-700 text-white text-xs shadow-md shadow-orange-600/20"
-                  onClick={() => copyToClipboard(welcomeEmailText, 'emailText')}
+                  onClick={() => copyToClipboard(emailTemplateText, 'emailText')}
                 >
                   {copiedKey === 'emailText' ? <Check className="h-3.5 w-3.5 mr-1 text-emerald-400" /> : <Send className="h-3.5 w-3.5 mr-1" />}
-                  Copy Welcome Email Text
+                  Copy Invitation Message
                 </Button>
               </div>
 
               <p className="text-[11px] text-zinc-500 text-center">
-                You can send these credentials directly to the customer via Email, WhatsApp, or Slack.
+                The customer will click the link in their email, set their password, and then be redirected to the login page.
               </p>
             </div>
 
@@ -681,9 +544,9 @@ EMMIL Administrator Team`
               <Button
                 variant="outline"
                 className="border-zinc-700 text-white w-full"
-                onClick={() => setCreatedCredentials(null)}
+                onClick={() => setInviteSuccess(null)}
               >
-                Close & Return to Customer Directory
+                Done
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -712,9 +575,9 @@ EMMIL Administrator Team`
                   id="edit-plan-select"
                   className="w-full h-10 px-3 rounded-md bg-zinc-950 border border-zinc-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
                 >
-                  <option value="starter">Starter (5 Accounts)</option>
-                  <option value="growth">Growth (20 Accounts)</option>
-                  <option value="pro">Pro (50 Accounts)</option>
+                  <option value="starter">Starter (5 Mailboxes)</option>
+                  <option value="growth">Growth (20 Mailboxes)</option>
+                  <option value="pro">Pro (50 Mailboxes)</option>
                   <option value="enterprise">Enterprise (Unlimited)</option>
                 </select>
               </div>

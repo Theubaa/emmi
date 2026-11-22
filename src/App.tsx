@@ -10,6 +10,7 @@ import { AdminLayout } from '@/components/layouts/AdminLayout'
 // Auth Pages
 import { LoginPage } from '@/features/auth/LoginPage'
 import { ForgotPasswordPage } from '@/features/auth/ForgotPasswordPage'
+import { SetPasswordPage } from '@/features/auth/SetPasswordPage'
 import { SuperAdminLoginPage } from '@/features/auth/SuperAdminLoginPage'
 
 // App Pages
@@ -115,6 +116,8 @@ export default function App() {
         {/* Public sign up disabled: redirected to /login */}
         <Route path="/register" element={<Navigate to="/login" replace />} />
         <Route path="/forgot-password" element={<PublicRoute><ForgotPasswordPage /></PublicRoute>} />
+        <Route path="/set-password" element={<SetPasswordPage />} />
+        <Route path="/reset-password" element={<SetPasswordPage />} />
       </Route>
 
       {/* Super Admin Dedicated Login Route */}
