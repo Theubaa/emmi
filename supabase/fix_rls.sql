@@ -374,3 +374,94 @@ BEGIN
   RETURN TRUE;
 END;
 $$;
+
+-- ==============================================================================
+-- 11. MASTER RPC FUNCTION: onboard_new_customer (All-in-One Customer + Workspace + User)
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION public.onboard_new_customer(
+  company_name TEXT,
+  owner_email TEXT,
+  owner_password TEXT,
+  owner_full_name TEXT,
+  plan_tier TEXT DEFAULT 'starter'
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth, extensions
+AS $$
+DECLARE
+  new_cust_id UUID;
+  new_ws_id UUID;
+  new_user_id UUID;
+  encrypted_pw TEXT;
+  ws_slug TEXT;
+BEGIN
+  -- Verify caller is super admin
+  IF NOT public.is_super_admin(auth.uid()) THEN
+    RAISE EXCEPTION 'Access Denied: Only Super Administrators can onboard customers.';
+  END IF;
+
+  -- 1. Create Customer record
+  new_cust_id := gen_random_uuid();
+  INSERT INTO public.customers (id, name, email, plan, status, created_at, updated_at)
+  VALUES (new_cust_id, company_name, owner_email, plan_tier, 'active', now(), now());
+
+  -- 2. Create Workspace
+  new_ws_id := gen_random_uuid();
+  ws_slug := lower(regexp_replace(company_name, '[^a-zA-Z0-9]+', '-', 'g')) || '-' || substring(gen_random_uuid()::text from 1 for 4);
+  INSERT INTO public.workspaces (id, customer_id, name, slug, status, created_at, updated_at)
+  VALUES (new_ws_id, new_cust_id, company_name || ' Workspace', ws_slug, 'active', now(), now());
+
+  -- 3. Check or Create User in auth.users
+  SELECT id INTO new_user_id FROM auth.users WHERE email = owner_email;
+  
+  IF new_user_id IS NULL THEN
+    new_user_id := gen_random_uuid();
+    encrypted_pw := crypt(owner_password, gen_salt('bf'));
+
+    INSERT INTO auth.users (
+      instance_id, id, aud, role, email, encrypted_password,
+      email_confirmed_at, raw_app_meta_data, raw_user_meta_data,
+      created_at, updated_at, confirmation_token, recovery_token
+    ) VALUES (
+      '00000000-0000-0000-0000-000000000000',
+      new_user_id, 'authenticated', 'authenticated', owner_email, encrypted_pw,
+      now(), '{"provider":"email","providers":["email"]}'::jsonb,
+      jsonb_build_object('full_name', owner_full_name),
+      now(), now(), '', ''
+    );
+
+    INSERT INTO auth.identities (
+      id, user_id, identity_data, provider, last_sign_in_at, created_at, updated_at
+    ) VALUES (
+      gen_random_uuid(), new_user_id,
+      jsonb_build_object('sub', new_user_id::text, 'email', owner_email),
+      'email', now(), now(), now()
+    );
+
+    INSERT INTO public.profiles (
+      id, email, full_name, is_super_admin, created_at, updated_at
+    ) VALUES (
+      new_user_id, owner_email, owner_full_name, FALSE, now(), now()
+    );
+  END IF;
+
+  -- 4. Add User as Owner of the Workspace
+  INSERT INTO public.workspace_members (workspace_id, user_id, role, created_at, updated_at)
+  VALUES (new_ws_id, new_user_id, 'owner', now(), now())
+  ON CONFLICT (workspace_id, user_id) DO NOTHING;
+
+  -- 5. Audit log
+  INSERT INTO public.audit_logs (user_id, action, resource_type, resource_id, metadata, created_at)
+  VALUES (auth.uid(), 'onboard_customer', 'customer', new_cust_id, jsonb_build_object('company', company_name, 'email', owner_email, 'plan', plan_tier), now());
+
+  RETURN jsonb_build_object(
+    'customer_id', new_cust_id,
+    'workspace_id', new_ws_id,
+    'user_id', new_user_id,
+    'email', owner_email,
+    'company_name', company_name
+  );
+END;
+$$;

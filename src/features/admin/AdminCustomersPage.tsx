@@ -11,10 +11,15 @@ import {
   Ban,
   Trash2,
   Edit2,
-  Layers,
-  Mail,
+  Key,
+  Copy,
+  Check,
+  Eye,
+  EyeOff,
+  Sparkles,
+  Send,
   Loader2,
-  Calendar,
+  ShieldAlert,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { toast } from '@/hooks/use-toast'
@@ -22,7 +27,7 @@ import { formatRelativeTime } from '@/lib/utils'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Card, CardContent } from '@/components/ui/card'
+import { Card } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import {
   Dialog,
@@ -41,21 +46,42 @@ import {
 } from '@/components/ui/select'
 import type { Customer } from '@/types/database'
 
+function generateStrongPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*'
+  let pw = ''
+  for (let i = 0; i < 12; i++) {
+    pw += chars.charAt(Math.floor(Math.random() * chars.length))
+  }
+  return 'Emmi#' + pw
+}
+
 const createCustomerSchema = z.object({
-  name: z.string().min(2, 'Customer / Organization name is required'),
-  email: z.string().email('Valid billing/admin email required'),
+  name: z.string().min(2, 'Company / Organization name is required'),
+  ownerName: z.string().min(2, 'Owner / Contact person name is required'),
+  email: z.string().email('Valid customer login email required'),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
   plan: z.enum(['starter', 'growth', 'pro', 'enterprise']).default('starter'),
   status: z.enum(['active', 'trial', 'suspended']).default('active'),
-  createWorkspace: z.boolean().default(true),
-  workspaceName: z.string().optional(),
 })
 
 type CreateCustomerForm = z.infer<typeof createCustomerSchema>
+
+interface CreatedCredentials {
+  companyName: string
+  ownerName: string
+  email: string
+  password: string
+  plan: string
+}
 
 export function AdminCustomersPage() {
   const [search, setSearch] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null)
+  const [showPassword, setShowPassword] = useState(false)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const [createdCredentials, setCreatedCredentials] = useState<CreatedCredentials | null>(null)
+
   const queryClient = useQueryClient()
 
   const {
@@ -70,14 +96,14 @@ export function AdminCustomersPage() {
     defaultValues: {
       plan: 'starter',
       status: 'active',
-      createWorkspace: true,
+      password: generateStrongPassword(),
     },
   })
 
   const selectedPlan = watch('plan')
   const selectedStatus = watch('status')
 
-  // Fetch all customers with their linked workspaces count
+  // Fetch all customers
   const { data: customers, isLoading } = useQuery({
     queryKey: ['admin-customers', search],
     queryFn: async () => {
@@ -86,18 +112,44 @@ export function AdminCustomersPage() {
         query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`)
       }
       const { data, error } = await query
-      if (error) {
-        console.error('Error fetching customers:', error)
-        throw error
-      }
+      if (error) throw error
       return (data || []) as Customer[]
     },
   })
 
-  // Create customer mutation
+  // Onboard customer mutation (Customer Org + Workspace + Admin User Login)
   const createCustomerMutation = useMutation({
     mutationFn: async (data: CreateCustomerForm) => {
-      // 1. Insert customer
+      // 1. Try master RPC onboard_new_customer
+      try {
+        const { data: rpcData, error: rpcError } = await (supabase.rpc as any)('onboard_new_customer', {
+          company_name: data.name,
+          owner_email: data.email,
+          owner_password: data.password,
+          owner_full_name: data.ownerName,
+          plan_tier: data.plan,
+        })
+
+        if (!rpcError && rpcData) {
+          return {
+            companyName: data.name,
+            ownerName: data.ownerName,
+            email: data.email,
+            password: data.password,
+            plan: data.plan,
+          }
+        }
+
+        if (rpcError && !rpcError.message.includes('function') && !rpcError.message.includes('does not exist')) {
+          throw new Error(rpcError.message)
+        }
+      } catch (err: any) {
+        if (!err.message?.includes('function') && !err.message?.includes('does not exist')) {
+          throw err
+        }
+      }
+
+      // 2. Direct fallback: insert customer + workspace + user
       const { data: customer, error: customerErr } = await supabase
         .from('customers')
         .insert({
@@ -113,37 +165,65 @@ export function AdminCustomersPage() {
 
       if (customerErr) throw customerErr
 
-      // 2. Optional: Create initial workspace
-      if (data.createWorkspace && customer) {
-        const wsName = data.workspaceName?.trim() || `${data.name} Workspace`
-        const wsSlug = wsName.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Math.random().toString(36).substring(2, 6)
-
-        await supabase.from('workspaces').insert({
+      // Create workspace
+      const wsSlug = data.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Math.random().toString(36).substring(2, 6)
+      const { data: ws } = await supabase
+        .from('workspaces')
+        .insert({
           customer_id: customer.id,
-          name: wsName,
+          name: `${data.name} Workspace`,
           slug: wsSlug,
           status: 'active',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
+        .select()
+        .single()
+
+      // Create user login account via RPC or API
+      try {
+        await (supabase.rpc as any)('create_new_user', {
+          user_email: data.email,
+          user_password: data.password,
+          user_name: data.ownerName,
+          make_super_admin: false,
+        })
+      } catch {
+        // Fallback to API
+        await fetch('/api/admin/create-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: data.email,
+            password: data.password,
+            fullName: data.ownerName,
+            isSuperAdmin: false,
+          }),
+        })
       }
 
-      return customer
+      return {
+        companyName: data.name,
+        ownerName: data.ownerName,
+        email: data.email,
+        password: data.password,
+        plan: data.plan,
+      }
     },
-    onSuccess: (newCust) => {
+    onSuccess: (credentials) => {
       queryClient.invalidateQueries({ queryKey: ['admin-customers'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-workspaces'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-profiles'] })
       queryClient.invalidateQueries({ queryKey: ['super-admin-overview'] })
-      toast({
-        title: 'Customer Created',
-        description: `Customer account "${newCust?.name}" has been created successfully.`,
-      })
-      reset()
+
       setShowCreateModal(false)
+      setCreatedCredentials(credentials)
+      reset()
     },
     onError: (err: any) => {
       toast({
-        title: 'Creation Failed',
-        description: err.message || 'Could not create customer account.',
+        title: 'Customer Onboarding Failed',
+        description: err.message || 'Could not provision customer organization and login.',
         variant: 'destructive',
       })
     },
@@ -207,6 +287,35 @@ export function AdminCustomersPage() {
     },
   })
 
+  const copyToClipboard = (text: string, key: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedKey(key)
+    setTimeout(() => setCopiedKey(null), 2000)
+    toast({ title: 'Copied to Clipboard' })
+  }
+
+  const welcomeEmailText = createdCredentials
+    ? `Subject: Welcome to EMMIL - Your Workspace Login Credentials
+
+Hi ${createdCredentials.ownerName},
+
+Your EMMIL cold outreach workspace has been provisioned!
+
+Login Portal: https://emmi.vascularexpert.in/login
+Email: ${createdCredentials.email}
+Password: ${createdCredentials.password}
+
+Plan Tier: ${createdCredentials.plan.toUpperCase()}
+
+Next Steps:
+1. Log in to your workspace at https://emmi.vascularexpert.in/login
+2. Connect your sending email accounts (Google, Outlook, or Custom SMTP/IMAP)
+3. Upload your leads and launch your first email outreach campaign.
+
+Best regards,
+EMMIL Administrator Team`
+    : ''
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -217,21 +326,24 @@ export function AdminCustomersPage() {
             Customer Organizations
           </h1>
           <p className="text-zinc-400 text-sm">
-            Manage client tenant accounts, subscription plans, and service status.
+            Onboard client organizations, generate initial login credentials, and manage service tiers.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           <div className="w-full sm:w-64">
             <Input
-              placeholder="Search by name or email..."
+              placeholder="Search by company or email..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="bg-zinc-900 border-zinc-700 text-white placeholder:text-zinc-500"
             />
           </div>
           <Button
-            onClick={() => setShowCreateModal(true)}
+            onClick={() => {
+              setValue('password', generateStrongPassword())
+              setShowCreateModal(true)
+            }}
             className="bg-orange-600 hover:bg-orange-700 text-white shrink-0 shadow-lg shadow-orange-600/20"
           >
             <Plus className="h-4 w-4 mr-2" />
@@ -247,10 +359,10 @@ export function AdminCustomersPage() {
             <thead>
               <tr className="border-b border-zinc-800 bg-zinc-950/60 text-left text-xs font-semibold text-zinc-400 uppercase tracking-wider">
                 <th className="p-3.5">Organization</th>
-                <th className="p-3.5">Contact Email</th>
-                <th className="p-3.5">Subscription Plan</th>
+                <th className="p-3.5">Admin Email</th>
+                <th className="p-3.5">Plan Tier</th>
                 <th className="p-3.5">Account Status</th>
-                <th className="p-3.5">Created Date</th>
+                <th className="p-3.5">Registered</th>
                 <th className="p-3.5 text-right">Actions</th>
               </tr>
             </thead>
@@ -357,22 +469,22 @@ export function AdminCustomersPage() {
         </div>
       </Card>
 
-      {/* Create Customer Modal */}
+      {/* Onboard Customer Modal */}
       <Dialog open={showCreateModal} onOpenChange={setShowCreateModal}>
         <DialogContent className="bg-zinc-900 border-zinc-800 text-white max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-xl">
               <Building2 className="h-5 w-5 text-orange-500" />
-              Register New Customer Organization
+              Onboard New Customer & Login Account
             </DialogTitle>
             <DialogDescription className="text-zinc-400 text-xs">
-              Provision a new client tenant with dedicated workspaces and tier limits.
+              This provisions their company workspace, creates the customer login, and sets their password.
             </DialogDescription>
           </DialogHeader>
 
           <form onSubmit={handleSubmit((d) => createCustomerMutation.mutate(d))} className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-xs text-zinc-300">Customer / Company Name</Label>
+              <Label className="text-xs text-zinc-300">Company / Organization Name</Label>
               <Input
                 placeholder="e.g. Acme Health Corp"
                 className="bg-zinc-950 border-zinc-700 text-white placeholder:text-zinc-600"
@@ -381,20 +493,61 @@ export function AdminCustomersPage() {
               {errors.name && <p className="text-xs text-rose-400">{errors.name.message}</p>}
             </div>
 
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-zinc-300">Customer Admin Name</Label>
+                <Input
+                  placeholder="e.g. Rahul Sharma"
+                  className="bg-zinc-950 border-zinc-700 text-white placeholder:text-zinc-600"
+                  {...register('ownerName')}
+                />
+                {errors.ownerName && <p className="text-xs text-rose-400">{errors.ownerName.message}</p>}
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs text-zinc-300">Customer Login Email</Label>
+                <Input
+                  type="email"
+                  placeholder="admin@acmehealth.com"
+                  className="bg-zinc-950 border-zinc-700 text-white placeholder:text-zinc-600"
+                  {...register('email')}
+                />
+                {errors.email && <p className="text-xs text-rose-400">{errors.email.message}</p>}
+              </div>
+            </div>
+
             <div className="space-y-1.5">
-              <Label className="text-xs text-zinc-300">Primary Billing & Contact Email</Label>
-              <Input
-                type="email"
-                placeholder="billing@acmehealth.com"
-                className="bg-zinc-950 border-zinc-700 text-white placeholder:text-zinc-600"
-                {...register('email')}
-              />
-              {errors.email && <p className="text-xs text-rose-400">{errors.email.message}</p>}
+              <div className="flex items-center justify-between">
+                <Label className="text-xs text-zinc-300">Password for Customer</Label>
+                <button
+                  type="button"
+                  onClick={() => setValue('password', generateStrongPassword())}
+                  className="text-[11px] text-orange-400 hover:text-orange-300 flex items-center gap-1 font-mono"
+                >
+                  <Sparkles className="h-3 w-3" /> Generate Random
+                </button>
+              </div>
+              <div className="relative">
+                <Input
+                  type={showPassword ? 'text' : 'password'}
+                  placeholder="Minimum 8 characters"
+                  className="bg-zinc-950 border-zinc-700 text-white font-mono placeholder:text-zinc-600 pr-10"
+                  {...register('password')}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              {errors.password && <p className="text-xs text-rose-400">{errors.password.message}</p>}
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label className="text-xs text-zinc-300">Subscription Tier</Label>
+                <Label className="text-xs text-zinc-300">Plan Tier</Label>
                 <Select
                   value={selectedPlan}
                   onValueChange={(val: any) => setValue('plan', val)}
@@ -403,9 +556,9 @@ export function AdminCustomersPage() {
                     <SelectValue placeholder="Select plan" />
                   </SelectTrigger>
                   <SelectContent className="bg-zinc-900 border-zinc-800 text-white">
-                    <SelectItem value="starter">Starter (5 Accounts)</SelectItem>
-                    <SelectItem value="growth">Growth (20 Accounts)</SelectItem>
-                    <SelectItem value="pro">Pro (50 Accounts)</SelectItem>
+                    <SelectItem value="starter">Starter (5 Mailboxes)</SelectItem>
+                    <SelectItem value="growth">Growth (20 Mailboxes)</SelectItem>
+                    <SelectItem value="pro">Pro (50 Mailboxes)</SelectItem>
                     <SelectItem value="enterprise">Enterprise (Unlimited)</SelectItem>
                   </SelectContent>
                 </Select>
@@ -429,21 +582,9 @@ export function AdminCustomersPage() {
               </div>
             </div>
 
-            <div className="rounded-lg bg-zinc-950 border border-zinc-800 p-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="auto-ws" className="text-xs text-zinc-300 font-medium cursor-pointer">
-                  Automatically Provision Initial Workspace
-                </Label>
-                <input
-                  id="auto-ws"
-                  type="checkbox"
-                  className="rounded border-zinc-700 text-orange-600 focus:ring-orange-500 bg-zinc-900"
-                  defaultChecked
-                  {...register('createWorkspace')}
-                />
-              </div>
-              <p className="text-[11px] text-zinc-500">
-                Creates a default working environment for this customer to connect mailboxes and run outreach campaigns.
+            <div className="rounded-lg bg-orange-950/20 border border-orange-500/20 p-3">
+              <p className="text-[11px] text-orange-300 leading-relaxed">
+                A dedicated workspace will be auto-generated and linked to this user as Owner. On submission, you will receive their login link and credentials to share with them.
               </p>
             </div>
 
@@ -464,12 +605,90 @@ export function AdminCustomersPage() {
                 {(isSubmitting || createCustomerMutation.isPending) && (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 )}
-                Save & Provision Customer
+                Create Customer & Login
               </Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Customer Credentials Ready Success Modal */}
+      {createdCredentials && (
+        <Dialog open={!!createdCredentials} onOpenChange={() => setCreatedCredentials(null)}>
+          <DialogContent className="bg-zinc-900 border-zinc-800 text-white max-w-lg">
+            <DialogHeader>
+              <div className="flex items-center gap-2 text-emerald-400">
+                <CheckCircle className="h-6 w-6" />
+                <DialogTitle className="text-xl text-white">Customer Provisioned Successfully!</DialogTitle>
+              </div>
+              <DialogDescription className="text-zinc-400 text-xs">
+                The customer organization, workspace, and login credentials have been created.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4 py-2">
+              <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-4 space-y-3 font-mono text-xs">
+                <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
+                  <span className="text-zinc-500">Portal URL</span>
+                  <span className="text-orange-400 font-bold select-all">https://emmi.vascularexpert.in/login</span>
+                </div>
+
+                <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
+                  <span className="text-zinc-500">Customer</span>
+                  <span className="text-white font-semibold">{createdCredentials.companyName}</span>
+                </div>
+
+                <div className="flex justify-between items-center pb-2 border-b border-zinc-800">
+                  <span className="text-zinc-500">Login Email</span>
+                  <span className="text-zinc-200 select-all font-semibold">{createdCredentials.email}</span>
+                </div>
+
+                <div className="flex justify-between items-center">
+                  <span className="text-zinc-500">Password</span>
+                  <span className="text-emerald-400 font-bold select-all">{createdCredentials.password}</span>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <Button
+                  className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white text-xs"
+                  onClick={() =>
+                    copyToClipboard(
+                      `Portal: https://emmi.vascularexpert.in/login\nEmail: ${createdCredentials.email}\nPassword: ${createdCredentials.password}`,
+                      'creds'
+                    )
+                  }
+                >
+                  {copiedKey === 'creds' ? <Check className="h-3.5 w-3.5 mr-1 text-emerald-400" /> : <Copy className="h-3.5 w-3.5 mr-1" />}
+                  Copy Login & Password
+                </Button>
+
+                <Button
+                  className="flex-1 bg-orange-600 hover:bg-orange-700 text-white text-xs shadow-md shadow-orange-600/20"
+                  onClick={() => copyToClipboard(welcomeEmailText, 'emailText')}
+                >
+                  {copiedKey === 'emailText' ? <Check className="h-3.5 w-3.5 mr-1 text-emerald-400" /> : <Send className="h-3.5 w-3.5 mr-1" />}
+                  Copy Welcome Email Text
+                </Button>
+              </div>
+
+              <p className="text-[11px] text-zinc-500 text-center">
+                You can send these credentials directly to the customer via Email, WhatsApp, or Slack.
+              </p>
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                className="border-zinc-700 text-white w-full"
+                onClick={() => setCreatedCredentials(null)}
+              >
+                Close & Return to Customer Directory
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
 
       {/* Edit Customer Modal */}
       {editingCustomer && (
